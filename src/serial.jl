@@ -1,10 +1,11 @@
-using Sockets
+using LibSerialPort
 
-mutable struct EspMcp <: AbstractInputDev
+mutable struct EspMcpSerial <: AbstractInputDev
     devname::String
     devtype::String
-    ipaddr::IPv4
-    port::Int
+    com::String
+    baudrate::Int32
+    timeout::Int32
     buffer::CircularBuffer{NTuple{80,UInt8}}
     task::DaqTask
     config::DaqConfig
@@ -13,97 +14,57 @@ mutable struct EspMcp <: AbstractInputDev
     vref::Float64
 end
 
-"Returns the IP address of the device"
-ipaddr(dev::EspMcp) = dev.ipaddr
 
-"Returns the port number used for TCP/IP communication"
-portnum(dev::EspMcp) = dev.port
+"Returns the serial com"
+serialport(dev::EspMcpSerial) = dev.com
 
-DAQCore.devtype(dev::EspMcp) = "ESPMCP"
 
-"Is JAnem acquiring data?"
-DAQCore.isreading(dev::EspMcp) = isreading(dev.task)
+
+DAQCore.devtype(dev::EspMcpSerial) = "ESPMCP"
+
+DAQCore.isreading(dev::EspMcpSerial) = isreading(dev.task)
 
 "How many samples have been read?"
-DAQCore.samplesread(dev::EspMcp) = samplesread(dev.task)
+DAQCore.samplesread(dev::EspMcpSerial) = samplesread(dev.task)
 
-function Base.show(io::IO, dev::EspMcp)
-    println(io, "EspMcp")
+function Base.show(io::IO, dev::EspMcpSerial)
+    println(io, "EspMcpSerial")
     println(io, "    Dev Name: $(devname(dev))")
-    println(io, "    IP: $(string(dev.ipaddr))")
-    println(io, "    port: $(string(dev.port))")
-end
-
-function openespmcp(ipaddr::IPv4, port=9523,  timeout=5)
-        
-    sock = TCPSocket()
-    t = Timer(_ -> close(sock), timeout)
-    try
-        connect(sock, ipaddr, port)
-    catch e
-        if isa(e, InterruptException)
-            throw(InterruptException())
-        else
-            error("Could not connect to $ipaddr ! Turn on the device or set the right IP address!")
-        end
-    finally
-        close(t)
-    end
-    
-    return sock
-end
-
-openespmcp(dev::EspMcp,  timeout=5) = openespmcp(ipaddr(dev), portnum(dev), timeout)
-
-
-function openespmcp(fun::Function, ip, port=9525, timeout=5)
-    io = openespmcp(ip, port, timeout)
-    try
-        fun(io)
-    catch e
-        throw(e)
-    finally
-        close(io)
-    end
-end
-
-function openespmcp(fun::Function, dev::EspMcp, timeout=5)
-    io = openespmcp(ipaddr(dev), portnum(dev), timeout)
-    try
-        fun(io)
-    catch e
-        throw(e)
-    finally
-        close(io)
-    end
+    println(io, "    COM: $(dev.com)")
+    println(io, "    Baudrate: $(dev.baudrate)")
 end
 
 
-function EspMcp(; devname="ESPMCP", ip="192.168.0.102", timeout=10, buflen=100_000,
-                port=9523, tag="", sn="", usethread=true, vref=2.5)
+
+function EspMcpSerial(; devname="ESPMCP", com="/dev/ttyUSB0", timeout=1,
+                      buflen=100_000, tag="", sn="",
+                      baudrate=115200, usethread=true, vref=2.5)
     dtype = "ESPMCP"
-    ipaddr = IPv4(ip)
-    openespmcp(ipaddr, port, timeout) do io
-        println(io, "!A", 100)
+    LibSerialPort.open(com, baudrate) do io
+        println(io, "!A10")
         readline(io)
         println(io, "!F", 1)
         readline(io)
         println(io, "!P", 100)
         readline(io)
+        
     end
     
-    config = DaqConfig(ip=ip, port=port, avg=100, fps=1, period=100, tag=tag, sn=sn)
+    config = DaqConfig(com=com, baudrate=baudrate,
+                       avg=10, fps=1, period=100, tag=tag, sn=sn,
+                       vref=float(vref))
     buf = CircularBuffer{NTuple{80,UInt8}}(buflen)
     task = DaqTask()
     
     ch = DaqChannels("E" .* numstring.(1:32), collect(1:32))
 
-    return EspMcp(devname, dtype, ipaddr, port, buffer, task,
-                  config, ch, usethread, vref)
+    return EspMcpSerial(devname, dtype, com, buffer, task,
+                        config, ch, usethread, vref)
     
 end
 
-function DAQCore.daqaddinput(dev::EspMcp, chans=1:32; names="E")
+
+function DAQCore.daqaddinput(dev::EspMcpSerial, chans=1:32; names="E")
     
     cmin, cmax = extrema(chans)
     if cmin < 1 || cmax > 32
@@ -123,7 +84,8 @@ function DAQCore.daqaddinput(dev::EspMcp, chans=1:32; names="E")
     return
 end
 
-function DAQCore.daqconfigdev(dev::EspMcp; kw...)
+
+function DAQCore.daqconfigdev(dev::EspMcpSerial; kw...)
     k = keys(kw)
     cmd = Dict("avg"=>"A", "fps"=>"F", "period"=>"P")
     args = Pair{String,Int}[]
@@ -152,12 +114,13 @@ function DAQCore.daqconfigdev(dev::EspMcp; kw...)
     end
 
     if length(args) > 0
-        openespmcp(dev) do io
+        LibSerialPort(dev.com, dev.baudrate) do io
             for a in args
                 var = first(a)
                 val = second(a)
-                readline(io)
+                # readline(io)
                 println(io, string("!" * cmd[var] * val))
+                
                 iparam!(dev.config, var, val)
             end
         end
@@ -165,7 +128,7 @@ function DAQCore.daqconfigdev(dev::EspMcp; kw...)
     return
 end
 
-function scan!(dev::EspMcp)
+function scan!(dev::EspMcpSerial)
     fps = iparam(dev.config, "fps")
     avg = iparam(dev.config, "avg")
     period = iparam(dev.config, "period")

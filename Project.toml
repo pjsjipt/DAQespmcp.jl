@@ -7,10 +7,12 @@ version = "1.0.0-DEV"
 DAQCore = "7b03aed3-9854-4651-ba28-76b88bef8818"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+LibSerialPort = "a05a14c7-6e3b-5ba9-90a2-45558833e1df"
 PyCall = "438e738f-606a-5dbb-bf0a-cddfbfd45ab0"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 
 [compat]
+LibSerialPort = "0.5.2"
 julia = "1"
 
 [extras]
