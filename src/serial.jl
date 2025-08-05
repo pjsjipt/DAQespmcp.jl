@@ -136,7 +136,7 @@ function scan!(dev::EspMcpSerial)
     dev.buffer = CircularBuffer{SVector{80,UInt8}}(fps)
 
     tsk = dev.task
-    isreading(tsk) && error("DSA is already reading!")
+    isreading(tsk) && error("EspMcp is already reading!")
     cleartask!(tsk)
     
     LibSerialPort.open(dev.com, dev.baudrate) do io
