@@ -1,12 +1,14 @@
 using LibSerialPort
+import StaticArrays: SVector
+export EspMcpSerial
 
 mutable struct EspMcpSerial <: AbstractInputDev
     devname::String
     devtype::String
     com::String
     baudrate::Int32
-    timeout::Int32
-    buffer::CircularBuffer{NTuple{80,UInt8}}
+    timeout::Float64
+    buffer::CircularBuffer{SVector{80,UInt8}}
     task::DaqTask
     config::DaqConfig
     chans::DaqChannels{Vector{Int}}
@@ -37,15 +39,15 @@ end
 
 
 function EspMcpSerial(; devname="ESPMCP", com="/dev/ttyUSB0", timeout=1,
-                      buflen=100_000, tag="", sn="",
+                      buflen=10, tag="", sn="",
                       baudrate=115200, usethread=true, vref=2.5)
     dtype = "ESPMCP"
     LibSerialPort.open(com, baudrate) do io
-        println(io, "!A10")
+        println(io, ".A10")
         readline(io)
-        println(io, "!F", 1)
+        println(io, ".F", 1)
         readline(io)
-        println(io, "!P", 100)
+        println(io, ".P", 100)
         readline(io)
         
     end
@@ -53,13 +55,12 @@ function EspMcpSerial(; devname="ESPMCP", com="/dev/ttyUSB0", timeout=1,
     config = DaqConfig(com=com, baudrate=baudrate,
                        avg=10, fps=1, period=100, tag=tag, sn=sn,
                        vref=float(vref))
-    buf = CircularBuffer{NTuple{80,UInt8}}(buflen)
+    buf = CircularBuffer{SVector{80,UInt8}}(buflen)
     task = DaqTask()
     
     ch = DaqChannels("E" .* numstring.(1:32), collect(1:32))
-
-    return EspMcpSerial(devname, dtype, com, buffer, task,
-                        config, ch, usethread, vref)
+    return EspMcpSerial(devname, dtype, com, baudrate, float(timeout),
+                        buf, task, config, ch, usethread, vref)
     
 end
 
@@ -114,13 +115,12 @@ function DAQCore.daqconfigdev(dev::EspMcpSerial; kw...)
     end
 
     if length(args) > 0
-        LibSerialPort(dev.com, dev.baudrate) do io
+        LibSerialPort.open(dev.com, dev.baudrate) do io
             for a in args
-                var = first(a)
-                val = second(a)
-                # readline(io)
-                println(io, string("!" * cmd[var] * val))
-                
+                var = a.first
+                val = a.second
+                println(io, ".$(cmd[var])$(val))")
+                readline(io)
                 iparam!(dev.config, var, val)
             end
         end
@@ -132,9 +132,85 @@ function scan!(dev::EspMcpSerial)
     fps = iparam(dev.config, "fps")
     avg = iparam(dev.config, "avg")
     period = iparam(dev.config, "period")
-    tps = max(period, 10, avg*2) * 0.001  # Time per frame in secoinds
+    tps = 5*max(period,  avg*2) * 0.001  # Time per frame in seconds
+    dev.buffer = CircularBuffer{SVector{80,UInt8}}(fps)
+
+    tsk = dev.task
+    isreading(tsk) && error("DSA is already reading!")
+    cleartask!(tsk)
     
-    #openespmcp(dev, tps*10) do io
-    #    println(io, "*")
+    LibSerialPort.open(dev.com, dev.baudrate) do io
+        println(io, "*")
+        tsk.isreading = true
+        tsk.time = now()
+        t0 = time_ns()
+        for i in 1:fps
+            # Read the response:
+            push!(dev.buffer, read(io, 80))
+            t1 = time_ns()
+            settiming!(tsk, t0, t1, i)
+            tsk.nread = i
+        end
+        tsk.isreading = false
+    end
+end
+
+function read_voltages(buf, vref)
+
+    N = length(buf)
+
+    E = zeros(32, N)
+    t = zeros(Int32, N)
+    idx = zeros(Int32, N)
+    
+    for i in 1:N
+        b = buf[i]
+        ii = reinterpret(UInt16, b[13:76])
+        E[:,i] .= ii .* (vref ./ 4095.0)
+        t[i] = reinterpret(Int32, b[5:8])[1]
+        idx[i] = reinterpret(Int32, b[9:12])[1]
+    end
+    
+    return E, t, idx
+end
+
+function DAQCore.daqstart(dev::EspMcpSerial)
+    if isreading(dev)
+        error("EspMcp already reading!")
+    end
+    tsk = Threads.@spawn scan!(dev)
+    dev.task.task = tsk
+    
+    return tsk
+end
+
+function DAQCore.daqread(dev::EspMcpSerial)
+
+    wait(dev.task.task)
+
+    E, t, idx = read_voltages(dev.buffer, dev.vref)
+    unit = "V"
+    hour = dev.task.time
+
+    # fs = samplingrate(dev.task)
+    Nt = length(t)
+    if Nt == 1
+        fs = iparam(dev.config, "period")
+    else
+        fs = 1000*(Nt-1) / (t[end] - t[begin])
+    end
+                                
+    S = DaqSamplingRate(fs, size(E,2), hour)
+    return MeasData(devname(dev), devtype(dev), S, E, dev.chans, fill(unit,32))
+end
+
+function DAQCore.daqacquire(dev::EspMcpSerial)
+    if isreading(dev)
+        error("EspMcp already reading!")
+    end
+
+    scan!(dev)
+
+    return daqread(dev)
 end
 
